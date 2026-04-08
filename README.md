@@ -1,3 +1,13 @@
+---
+title: SQL Analytics Env
+emoji: 🗄️
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 8000
+---
+
 # SQL Analytics OpenEnv Environment
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)

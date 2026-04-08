@@ -1,0 +1,34 @@
+spec_version: 1
+version: 0.1.0
+name: sql_analytics_env
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+
+description: |
+  SQL Analytics environment where AI agents answer real-world
+  business-intelligence questions by writing SQL queries against
+  a seeded e-commerce database (100 customers, 50 products,
+  500 orders, 300 reviews). Ten tasks across easy/medium/hard
+  difficulty with partial-progress reward signals (0.0 - 1.0).
+
+tags:
+  - sql
+  - database
+  - business-intelligence
+  - reinforcement-learning
+  - real-world
+  - ecommerce
+
+tasks:
+  - task_001
+  - task_002
+  - task_003
+  - task_004
+  - task_005
+  - task_006
+  - task_007
+  - task_008
+  - task_009
+  - task_010

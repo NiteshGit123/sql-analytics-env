@@ -58,10 +58,12 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
-ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
-MAX_STEPS    = int(os.environ.get("MAX_STEPS", "8"))
+API_BASE_URL     = os.environ.get("API_BASE_URL",  "https://api.openai.com/v1")
+MODEL_NAME       = os.environ.get("MODEL_NAME",    "gpt-4o-mini")
+HF_TOKEN         = os.environ.get("HF_TOKEN")           # no default — must be set externally
+LOCAL_IMAGE_NAME = os.environ.get("LOCAL_IMAGE_NAME")   # optional, only for from_docker_image()
+ENV_BASE_URL     = os.environ.get("ENV_BASE_URL",  "http://localhost:8000")
+MAX_STEPS        = int(os.environ.get("MAX_STEPS", "8"))
 
 ALL_TASK_IDS = [
     "task_001",  # easy
@@ -279,8 +281,12 @@ def run_task(
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # Build OpenAI client — uses API_BASE_URL and MODEL_NAME from env vars
     llm_client = OpenAI(base_url=API_BASE_URL)
-    env        = SQLAnalyticsEnv(base_url=ENV_BASE_URL)
+
+    # HF_TOKEN is read from env automatically by the OpenEnv framework
+    # when connecting to a HuggingFace Space
+    env = SQLAnalyticsEnv(base_url=ENV_BASE_URL)
 
     scores: Dict[str, float] = {}
 

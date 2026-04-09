@@ -3,52 +3,39 @@ inference.py
 ------------
 Baseline LLM agent for the SQL Analytics OpenEnv environment.
 
-The agent receives a natural-language business-intelligence question,
-iteratively generates SQL queries using an LLM (via OpenAI-compatible
-API), executes them in the environment, and improves based on feedback.
+MANDATORY ENVIRONMENT VARIABLES
+--------------------------------
+    API_BASE_URL      The API endpoint for the LLM.
+    MODEL_NAME        The model identifier to use for inference.
+    HF_TOKEN          Your HuggingFace / API key.
+    LOCAL_IMAGE_NAME  Local Docker image name (only if using from_docker_image())
 
-Logging
--------
-Every event is printed to stdout in the strictly-required format:
+STDOUT FORMAT (required by evaluator)
+--------------------------------------
+    [START] task=<task_id> env=sql_analytics_env model=<model_name>
+    [STEP]  step=<n> action=<sql> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
 
-    [START] {"task_id": ..., "task_description": ..., "difficulty": ...}
-    [STEP]  {"task_id": ..., "step": ..., "sql": ..., "reward": ...,
-             "result_rows": ..., "error": ..., "done": ...}
-    [END]   {"task_id": ..., "final_score": ..., "total_steps": ...,
-             "success": ..., "timestamp": ...}
-
-Environment variables
----------------------
-    API_BASE_URL   Base URL for the OpenAI-compatible LLM endpoint
-                   (default: https://api.openai.com/v1)
-    MODEL_NAME     LLM model to use (default: gpt-4o-mini)
-    HF_TOKEN       HuggingFace token when connecting to HF Spaces
-    ENV_BASE_URL   URL of the running sql_analytics_env server
-                   (default: http://localhost:8000)
-    MAX_STEPS      Max LLM turns per task (default: 8)
-
-Usage
------
-    # Against local server started with:  uvicorn server.app:app --port 8000
-    python inference.py
-
-    # Against a HuggingFace Space:
-    ENV_BASE_URL=https://<your-space>.hf.space python inference.py
+Rules:
+    - One [START] per episode, one [STEP] per step, one [END] per episode.
+    - reward and rewards formatted to 2 decimal places.
+    - score formatted to 3 decimal places.
+    - done and success are lowercase: true or false.
+    - error is the raw error string, or null if none.
+    - All fields on a single line with no newlines within a line.
+    - [END] is always emitted, even on exception.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from openai import OpenAI, RateLimitError, APIConnectionError, APIStatusError
 
 # ── Environment client ────────────────────────────────────────────────────────
-# Support running inference.py both as standalone and inside the package.
 try:
     from client import SQLAnalyticsEnv
     from models import SQLAction
@@ -58,12 +45,13 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-API_BASE_URL     = os.environ.get("API_BASE_URL",  "https://api.openai.com/v1")
-MODEL_NAME       = os.environ.get("MODEL_NAME",    "gpt-4o-mini")
-HF_TOKEN         = os.environ.get("HF_TOKEN")           # no default — must be set externally
-LOCAL_IMAGE_NAME = os.environ.get("LOCAL_IMAGE_NAME")   # optional, only for from_docker_image()
-ENV_BASE_URL     = os.environ.get("ENV_BASE_URL",  "http://localhost:8000")
-MAX_STEPS        = int(os.environ.get("MAX_STEPS", "8"))
+API_KEY          = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL     = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME       = os.getenv("MODEL_NAME")   or "Qwen/Qwen2.5-72B-Instruct"
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")   # only needed for from_docker_image()
+ENV_BASE_URL     = os.getenv("ENV_BASE_URL",  "http://localhost:8000")
+MAX_STEPS        = int(os.getenv("MAX_STEPS", "8"))
+BENCHMARK        = "sql_analytics_env"
 
 ALL_TASK_IDS = [
     "task_001",  # easy
@@ -78,58 +66,34 @@ ALL_TASK_IDS = [
     "task_010",  # medium
 ]
 
-# ── Logging helpers ───────────────────────────────────────────────────────────
+SUCCESS_SCORE_THRESHOLD = 0.8  # reward >= 0.8 counts as solved
 
-def _emit(tag: str, payload: Dict[str, Any]) -> None:
-    """Print a structured log line to stdout (required evaluation format)."""
-    print(f"[{tag}] {json.dumps(payload, default=str)}", flush=True)
+# ── Logging helpers (required stdout format) ──────────────────────────────────
 
-
-def log_start(task_id: str, task_description: str, difficulty: str) -> None:
-    _emit("START", {
-        "task_id":          task_id,
-        "task_description": task_description,
-        "difficulty":       difficulty,
-        "timestamp":        datetime.now(timezone.utc).isoformat(),
-    })
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
-def log_step(
-    task_id: str,
-    step:    int,
-    sql:     str,
-    reward:  float,
-    result_rows: int,
-    error:   Optional[str],
-    done:    bool,
-) -> None:
-    _emit("STEP", {
-        "task_id":     task_id,
-        "step":        step,
-        "sql":         sql,
-        "reward":      reward,
-        "result_rows": result_rows,
-        "error":       error,
-        "done":        done,
-    })
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    # Escape newlines in SQL so it stays on one line
+    action_clean = action.replace("\n", " ").replace("\r", "")
+    error_val = error.replace("\n", " ") if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action_clean} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
 
 
-def log_end(
-    task_id:     str,
-    final_score: float,
-    total_steps: int,
-    success:     bool,
-) -> None:
-    _emit("END", {
-        "task_id":     task_id,
-        "final_score": final_score,
-        "total_steps": total_steps,
-        "success":     success,
-        "timestamp":   datetime.now(timezone.utc).isoformat(),
-    })
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
-# ── LLM helpers ───────────────────────────────────────────────────────────────
+# ── LLM prompt ────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """You are an expert SQL analyst. You will be given a business
 intelligence question about an e-commerce database and must answer it by
@@ -139,48 +103,33 @@ Rules:
 - Write ONLY the raw SQL query — no markdown, no explanation, no backticks.
 - The database is SQLite; use SQLite-compatible syntax.
 - Use ROUND(..., 2) for monetary values and ratings.
-- Use strftime('%m', date_column) to extract the month as a string;
-  CAST(strftime('%m', ...) AS INTEGER) for an integer.
-- When asked for growth rate you may use a self-join or a subquery
-  (SQLite does not always support window functions LAG).
+- Use strftime('%m', date_column) to extract the month as a string.
+- When asked for growth rate, use a self-join or subquery (SQLite does not
+  always support window function LAG).
 - Return only the columns asked for in the task description.
 """
 
-def _build_user_message(
-    schema:           str,
-    task_description: str,
-    history:          List[Dict],
-) -> str:
-    """Build the user turn including schema, task, and any prior attempt feedback."""
-    lines = [
-        "DATABASE SCHEMA:",
-        schema,
-        "",
-        "TASK:",
-        task_description,
-    ]
 
+def _build_user_message(schema: str, task_description: str, history: list) -> str:
+    lines = ["DATABASE SCHEMA:", schema, "", "TASK:", task_description]
     if history:
         lines += ["", "PREVIOUS ATTEMPTS (most recent first):"]
-        for attempt in reversed(history[-3:]):   # show last 3
-            lines.append(f"  SQL: {attempt['sql']}")
-            if attempt.get("error"):
-                lines.append(f"  Error: {attempt['error']}")
+        for h in reversed(history[-3:]):
+            lines.append(f"  SQL: {h['sql']}")
+            if h.get("error"):
+                lines.append(f"  Error: {h['error']}")
             else:
-                rows = attempt.get("result_rows", 0)
-                reward = attempt.get("reward", 0.0)
-                msg = attempt.get("message", "")
-                lines.append(f"  Rows returned: {rows} | Reward: {reward:.2f} | Feedback: {msg}")
+                lines.append(
+                    f"  Rows: {h.get('result_rows', 0)} | Reward: {h.get('reward', 0.0):.2f}"
+                )
         lines += ["", "Please write an improved SQL query."]
     else:
         lines += ["", "Write the SQL query:"]
-
     return "\n".join(lines)
 
 
-def _extract_sql(llm_response: str) -> str:
-    """Strip markdown fences and whitespace from the LLM output."""
-    sql = llm_response.strip()
+def _extract_sql(text: str) -> str:
+    sql = text.strip()
     for fence in ("```sql", "```SQL", "```"):
         if sql.startswith(fence):
             sql = sql[len(fence):]
@@ -192,126 +141,101 @@ def _extract_sql(llm_response: str) -> str:
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
-def run_task(
-    client:  OpenAI,
-    env:     SQLAnalyticsEnv,
-    task_id: str,
-) -> float:
-    """Run one task episode. Returns the final score (0.0–1.0)."""
-    # Reset
+def run_task(client: OpenAI, env: SQLAnalyticsEnv, task_id: str) -> float:
+    """Run one episode. Returns the final score in [0, 1]."""
     obs = env.reset(task_id=task_id)
     schema           = obs.db_schema or ""
     task_description = obs.task_description or ""
-    difficulty       = obs.metadata.get("difficulty", "?") if obs.metadata else "?"
 
-    log_start(task_id, task_description, difficulty)
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    history: List[Dict] = []
-    final_score = 0.0
-    step_count  = 0
+    history: list = []
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
 
-    for step in range(1, MAX_STEPS + 1):
-        # Ask LLM (with retry + exponential backoff)
-        user_msg = _build_user_message(schema, task_description, history)
-        sql = ""
-        for attempt in range(1, 4):   # up to 3 retries
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user",   "content": user_msg},
-                    ],
-                    temperature=0.0,
-                    max_tokens=512,
-                )
-                sql = _extract_sql(response.choices[0].message.content or "")
-                break   # success
-            except RateLimitError:
-                wait = 2 ** attempt
-                print(f"[WARN] Rate limited — waiting {wait}s (attempt {attempt}/3)", file=sys.stderr)
-                time.sleep(wait)
-            except APIConnectionError as exc:
-                print(f"[WARN] Connection error on step {step}, attempt {attempt}: {exc}", file=sys.stderr)
-                time.sleep(2)
-            except APIStatusError as exc:
-                print(f"[WARN] API error {exc.status_code} on step {step}: {exc.message}", file=sys.stderr)
+    try:
+        for step in range(1, MAX_STEPS + 1):
+            user_msg = _build_user_message(schema, task_description, history)
+            sql = ""
+
+            # LLM call with retry + exponential backoff
+            for attempt in range(1, 4):
+                try:
+                    response = client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=[
+                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "user",   "content": user_msg},
+                        ],
+                        temperature=0.0,
+                        max_tokens=512,
+                    )
+                    sql = _extract_sql(response.choices[0].message.content or "")
+                    break
+                except RateLimitError:
+                    time.sleep(2 ** attempt)
+                except APIConnectionError:
+                    time.sleep(2)
+                except (APIStatusError, Exception) as exc:
+                    print(f"[DEBUG] LLM error step={step}: {exc}", file=sys.stderr, flush=True)
+                    break
+
+            if not sql:
+                print(f"[DEBUG] No SQL at step={step}, stopping.", file=sys.stderr, flush=True)
                 break
-            except Exception as exc:
-                print(f"[WARN] Unexpected LLM error on step {step}: {exc}", file=sys.stderr)
+
+            obs = env.step(SQLAction(sql=sql))
+
+            reward      = obs.reward or 0.0
+            done        = obs.done
+            error       = obs.error
+            result_rows = len(obs.result) if obs.result else 0
+            steps_taken = step
+
+            rewards.append(reward)
+            log_step(step=step, action=sql, reward=reward, done=done, error=error)
+
+            history.append({
+                "sql":         sql,
+                "error":       error,
+                "result_rows": result_rows,
+                "reward":      reward,
+            })
+
+            if done:
                 break
 
-        if not sql:
-            print(f"[WARN] No SQL generated for step {step} — skipping.", file=sys.stderr)
-            break
+        score   = rewards[-1] if rewards else 0.0
+        success = score >= SUCCESS_SCORE_THRESHOLD
 
-        if not sql:
-            break
+    except Exception as exc:
+        print(f"[DEBUG] Unhandled exception in run_task: {exc}", file=sys.stderr, flush=True)
 
-        # Execute in environment
-        obs = env.step(SQLAction(sql=sql))
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-        result_rows = len(obs.result) if obs.result else 0
-        reward      = obs.reward or 0.0
-        error       = obs.error
-        done        = obs.done
-        message     = (obs.metadata or {}).get("message", "")
-        step_count  = step
-
-        log_step(task_id, step, sql, reward, result_rows, error, done)
-
-        history.append({
-            "sql":         sql,
-            "error":       error,
-            "result_rows": result_rows,
-            "reward":      reward,
-            "message":     message,
-        })
-
-        final_score = reward
-
-        if done:
-            break
-
-    success = final_score >= 0.9
-    log_end(task_id, final_score, step_count, success)
-    return final_score
+    return score
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Build OpenAI client — api_key read from OPENAI_API_KEY env var;
-    # falls back to "placeholder" for local/unauthenticated endpoints.
-    llm_client = OpenAI(
-        base_url=API_BASE_URL,
-        api_key=os.environ.get("OPENAI_API_KEY", "placeholder"),
-    )
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    env    = SQLAnalyticsEnv(base_url=ENV_BASE_URL)
 
-    # HF_TOKEN is read from env automatically by the OpenEnv framework
-    # when connecting to a HuggingFace Space
-    env = SQLAnalyticsEnv(base_url=ENV_BASE_URL)
-
-    scores: Dict[str, float] = {}
-
+    scores = {}
     try:
         for task_id in ALL_TASK_IDS:
-            score = run_task(llm_client, env, task_id)
-            scores[task_id] = score
+            scores[task_id] = run_task(client, env, task_id)
     finally:
         env.close()
 
-    # Summary
     avg = sum(scores.values()) / len(scores) if scores else 0.0
+    solved = sum(1 for s in scores.values() if s >= SUCCESS_SCORE_THRESHOLD)
     print(
-        json.dumps({
-            "summary": {
-                "scores":        scores,
-                "average_score": round(avg, 4),
-                "tasks_solved":  sum(1 for s in scores.values() if s >= 0.9),
-                "total_tasks":   len(scores),
-            }
-        }),
+        f"[SUMMARY] tasks={len(scores)} solved={solved} avg_score={avg:.3f}",
         flush=True,
     )
 

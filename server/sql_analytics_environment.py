@@ -901,7 +901,7 @@ class SQLAnalyticsEnvironment(Environment):
 
         return SQLObservation(
             done=False,
-            reward=0.0,
+            reward=0.01,
             result=None,
             error=None,
             db_schema=self._rich_schema,   # ← rich schema with samples
@@ -929,7 +929,7 @@ class SQLAnalyticsEnvironment(Environment):
         if self._current_task is None:
             return SQLObservation(
                 done=True,
-                reward=0.0,
+                reward=0.01,
                 error="No task loaded. Call reset(task_id=...) first.",
                 metadata={"message": "Call reset() before step()."},
             )
@@ -1004,6 +1004,9 @@ class SQLAnalyticsEnvironment(Environment):
 
         if done:
             self._state.solved = reward >= 0.82   # still counts as solved after bonus
+
+        # Clamp reward to strictly (0, 1) — validator rejects 0.0 and 1.0
+        reward = max(0.01, min(0.99, reward))
 
         # Enforce max-attempts cap
         if self._state.attempts >= self._state.max_attempts and not done:

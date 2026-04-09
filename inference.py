@@ -281,8 +281,12 @@ def run_task(
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Build OpenAI client — uses API_BASE_URL and MODEL_NAME from env vars
-    llm_client = OpenAI(base_url=API_BASE_URL)
+    # Build OpenAI client — api_key read from OPENAI_API_KEY env var;
+    # falls back to "placeholder" for local/unauthenticated endpoints.
+    llm_client = OpenAI(
+        base_url=API_BASE_URL,
+        api_key=os.environ.get("OPENAI_API_KEY", "placeholder"),
+    )
 
     # HF_TOKEN is read from env automatically by the OpenEnv framework
     # when connecting to a HuggingFace Space

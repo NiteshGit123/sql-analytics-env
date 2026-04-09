@@ -141,11 +141,11 @@ def _extract_sql(text: str) -> str:
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
-def run_task(client: OpenAI, env: SQLAnalyticsEnv, task_id: str) -> float:
+def run_task(client: OpenAI, env, task_id: str) -> float:
     """Run one episode. Returns the final score in [0, 1]."""
-    obs = env.reset(task_id=task_id)
-    schema           = obs.db_schema or ""
-    task_description = obs.task_description or ""
+    result = env.reset(task_id=task_id)
+    schema           = result.observation.db_schema or ""
+    task_description = result.observation.task_description or ""
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
@@ -186,12 +186,12 @@ def run_task(client: OpenAI, env: SQLAnalyticsEnv, task_id: str) -> float:
                 print(f"[DEBUG] No SQL at step={step}, stopping.", file=sys.stderr, flush=True)
                 break
 
-            obs = env.step(SQLAction(sql=sql))
+            result = env.step(SQLAction(sql=sql))
 
-            reward      = obs.reward or 0.0
-            done        = obs.done
-            error       = obs.error
-            result_rows = len(obs.result) if obs.result else 0
+            reward      = result.reward or 0.0
+            done        = result.done
+            error       = result.observation.error
+            result_rows = len(result.observation.result) if result.observation.result else 0
             steps_taken = step
 
             rewards.append(reward)
@@ -223,7 +223,7 @@ def run_task(client: OpenAI, env: SQLAnalyticsEnv, task_id: str) -> float:
 
 def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    env    = SQLAnalyticsEnv(base_url=ENV_BASE_URL)
+    env    = SQLAnalyticsEnv(base_url=ENV_BASE_URL).sync()
 
     scores = {}
     try:

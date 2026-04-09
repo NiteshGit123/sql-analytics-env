@@ -36,7 +36,9 @@ Example usage
         env.close()
 """
 
-from openenv.core.env_client import EnvClient
+from typing import Any, Dict
+
+from openenv.core.env_client import EnvClient, StepResult
 
 try:
     from .models import SQLAction, SQLObservation, SQLState
@@ -49,8 +51,8 @@ class SQLAnalyticsEnv(EnvClient[SQLAction, SQLObservation, SQLState]):
     Typed client for the SQL Analytics OpenEnv environment.
 
     Inherits the full EnvClient interface:
-        reset(**kwargs) -> SQLObservation
-        step(action: SQLAction) -> SQLObservation
+        reset(**kwargs) -> StepResult[SQLObservation]
+        step(action: SQLAction) -> StepResult[SQLObservation]
         state() -> SQLState
         close()
 
@@ -58,4 +60,18 @@ class SQLAnalyticsEnv(EnvClient[SQLAction, SQLObservation, SQLState]):
         SQLAnalyticsEnv.from_env(hf_repo_id)
         SQLAnalyticsEnv.from_docker_image(image_tag)
     """
-    pass
+
+    def _step_payload(self, action: SQLAction) -> Dict[str, Any]:
+        return action.model_dump()
+
+    def _parse_result(self, payload: Dict[str, Any]) -> StepResult[SQLObservation]:
+        obs_dict = payload.get("observation", {})
+        obs = SQLObservation(**obs_dict)
+        return StepResult(
+            observation=obs,
+            reward=payload.get("reward"),
+            done=payload.get("done", False),
+        )
+
+    def _parse_state(self, payload: Dict[str, Any]) -> SQLState:
+        return SQLState(**payload)
